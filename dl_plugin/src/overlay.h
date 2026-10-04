@@ -15,7 +15,8 @@ void SetVisible(bool v);    // the user's toggle (F7)
 void SetSuppressed(bool v); // hidden for now regardless (paused, no camera)
 void SetReproject(bool v);  // re-project GMod's older frame to DL's current camera
 void SetParallax(bool v);
-void SetMaxFps(int fps);    // Dying Light frame cap (0 = off)   // ...using the distances in its alpha for eye movement too
+void SetMaxFps(int fps, int autoLimit);  // Dying Light frame cap (0 = off, -1 = auto: refresh / N <= autoLimit)
+void SetLowLatency(bool v);             // before the first frame: at most one frame queued
 bool Visible();
 // Save what the player sees (next frame) to GModLight_shots\. Capped unless forced.
 void RequestScreenshot(const char* reason, bool force = false);

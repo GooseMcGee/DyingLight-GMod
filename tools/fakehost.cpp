@@ -222,6 +222,7 @@ int main(int argc, char** argv) {
     float latencyMs = 20;  // --latency MS
     bool night = false;  // --night: tell GMod the scene is dark blue, like Dying Light at night
     bool lying = false;  // --lying: the zombie lies on the ground
+    float groundAt = 0;  // --ground H: ground H m above the start under a driven zombie (a ledge)
     float parallaxMove = 0.4f;  // --parallax-move M
     bool parallaxTest = false;  // --parallaxtest: depth-aware re-projection vs GMod's own render
     std::wstring gmodArgs;  // --gmodargs "...": extra GMod command line (e.g. "+mat_queue_mode 0")
@@ -235,6 +236,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--night")) night = true;
         else if (!strcmp(argv[i], "--latency") && i + 1 < argc) latencyMs = float(atof(argv[++i]));
         else if (!strcmp(argv[i], "--lying")) lying = true;
+        else if (!strcmp(argv[i], "--ground") && i + 1 < argc) groundAt = float(atof(argv[++i]));
         else if (!strcmp(argv[i], "--parallaxtest")) parallaxTest = true;
         else if (!strcmp(argv[i], "--parallax-move") && i + 1 < argc) { parallaxTest = true; parallaxMove = float(atof(argv[++i])); }
         else if (!strcmp(argv[i], "--gmodargs") && i + 1 < argc) { std::string a = argv[++i]; gmodArgs.assign(a.begin(), a.end()); }
@@ -345,6 +347,27 @@ int main(int argc, char** argv) {
         if (mode == kModeSpawnMenu && (now / 16) % 10 == 0)
             shm::Push(kInMouseMove, int(W / 2 + 200 * std::cos(t)), int(H / 2 + 100 * std::sin(t)));
 
+        // Visuals: claim to draw every one, like Dying Light with DLGrenades=1.
+        {
+            Visuals& v = hdr->visuals;
+            uint32_t vn = std::min(v.count, kMaxVisuals);
+            static uint32_t lastVisualSeq = 0;
+            static DWORD lastVisualPrint = 0;
+            if (v.seq != lastVisualSeq) {
+                lastVisualSeq = v.seq;
+                for (uint32_t i = 0; i < vn; ++i) v.shown[i] = v.items[i].id;
+                v.shownCount = vn;
+                v.shownSeq++;
+                if (vn && now - lastVisualPrint >= 500) {
+                    lastVisualPrint = now;
+                    const Visual& it = v.items[0];
+                    printf("[%5.1fs] visual %u %s at (%.2f, %.2f, %.2f) fwd (%.2f, %.2f, %.2f) up (%.2f, %.2f, %.2f)\n", t, it.id,
+                           it.mesh, it.pos.x - o.x, it.pos.y - o.y, it.pos.z - o.z, it.fwd.x, it.fwd.y, it.fwd.z, it.up.x,
+                           it.up.y, it.up.z);
+                }
+            }
+        }
+
         // One fake zombie 3 m ahead, unless GMod is moving it.
         Npc& z = hdr->npcs[0];
         z.handle = 0x1234;
@@ -359,6 +382,10 @@ int main(int argc, char** argv) {
         }
         z.height = 1.8f;
         z.flags = kNpcAlive | kNpcPosed;
+        if (driven) {  // like Dying Light: the ground under what GMod moves
+            z.ground = o.y + groundAt;
+            z.flags |= kNpcGround;
+        }
         // Skeleton: standing, or with --lying flat on the ground pointing away to the side.
         z.feet = {z.pos.x, z.pos.y + 0.08f, z.pos.z};
         z.head = lying ? Vec3{z.pos.x, z.pos.y + 0.15f, z.pos.z + 1.55f} : Vec3{z.pos.x, z.pos.y + 1.62f, z.pos.z};

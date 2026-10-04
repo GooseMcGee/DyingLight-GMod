@@ -261,6 +261,7 @@ if SERVER then
 				e:SetPos(GML.ToSource(npc.x, npc.y, npc.z))
 			end
 			e.GMLLastSeen = CurTime()
+			e.GMLDLGround = npc.ground  -- Dying Light's ground under it, while GMod drives it
 		end
 		-- Where held stand-ins have been over the last ~0.1 s, for throwing.
 		local now = CurTime()
@@ -280,9 +281,9 @@ if SERVER then
 			elseif e.GMLDriven then
 				local phys = e:GetPhysicsObject()
 				local x, y, z = GML.ToDL(e:GetPos())
-				-- Its ground is the height it stood at. Thrown, it lands there (with a
-				-- thud); held, it can't be pushed below it.
-				local ground = e.GMLGroundY or y
+				-- Its ground is Dying Light's ground under it (else the height it stood at).
+				-- Thrown, it lands there (with a thud); held, it can't be pushed below it.
+				local ground = e.GMLDLGround or e.GMLGroundY or y
 				if y < ground and IsValid(phys) then
 					local fall = -phys:GetVelocity().z / M
 					if not e.GMLHeld then
@@ -398,14 +399,37 @@ if SERVER then
 		npc_grenade_frag = "bounce", prop_combine_ball = "bounce",
 		crossbow_bolt = "stick",
 	}
-	local tracked = {}       -- entity -> {last = pos}
+	local tracked = {}       -- entity -> {last = pos, what = behaviour if not by class, foot = offset to its bottom}
 	local probeOwner = {}    -- probe id -> {ent = e} or {bullet = true}, until answered
 	local pendingBullets = {}
 	local nextProbe, lastHitSeq, sentAny = 1, 0, false
 
+	-- Addon weapons (M9K and the like) fire their own entities. Anything the player's
+	-- gun launches that sounds like a projectile gets its own collision code called
+	-- where it meets Dying Light's world (rockets explode, stickies stick), then
+	-- bounces if it's still around.
+	local ADDON_PROJECTILE = {"rocket", "missile", "grenade", "launched", "thrown", "projectile", "bolt", "nade", "shell", "bullet", "arrow"}
+	local function addonProjectile(e)
+		local c = string.lower(e:GetClass())
+		if e:IsWeapon() or e:IsPlayer() or e:IsNPC() or c == "gml_proxy" then return false end
+		for _, k in ipairs(ADDON_PROJECTILE) do
+			if string.find(c, k, 1, true) then return true end
+		end
+		return false
+	end
+
 	hook.Add("OnEntityCreated", "gmodlight_world", function(e)
-		if not connected or not IsValid(e) or not PROJECTILES[e:GetClass()] then return end
-		timer.Simple(0, function() if IsValid(e) then tracked[e] = {last = e:GetPos()} end end)
+		if not connected or not IsValid(e) then return end
+		local known = PROJECTILES[e:GetClass()] ~= nil
+		timer.Simple(0, function()
+			if not IsValid(e) or tracked[e] then return end
+			if known then
+				tracked[e] = {last = e:GetPos()}
+			elseif addonProjectile(e) then
+				tracked[e] = {last = e:GetPos(), what = "collide"}
+				gmodlight.Log("tracking addon projectile " .. e:GetClass())
+			end
+		end)
 	end)
 
 	hook.Add("EntityFireBullets", "gmodlight_world", function(ent, data)
@@ -451,6 +475,65 @@ if SERVER then
 		if into < -150 then e:EmitSound("physics/metal/metal_grenade_impact_hard" .. math.random(1, 3) .. ".wav") end
 	end
 
+	-- A spawned item (weapon, health kit, vehicle) landing on Dying Light's ground:
+	-- stood on its bottom where it hit and frozen; off walls it bounces back.
+	local function settle(e, pos, normal)
+		local phys = e:GetPhysicsObject()
+		if not IsValid(phys) then return end
+		local t = tracked[e]
+		if normal.z < 0.6 then
+			local v = phys:GetVelocity()
+			local into = v:Dot(normal)
+			if into < 0 then phys:SetVelocity((v - normal * into * 1.3) * 0.6) end
+			return
+		end
+		e:SetPos(pos - (t and t.foot or vector_origin) + normal)
+		if t then t.last = e:GetPos() end
+		phys:SetVelocity(vector_origin)
+		phys:AddAngleVelocity(-phys:GetAngleVelocity())
+		phys:EnableMotion(false)
+	end
+
+	-- An addon's projectile hitting Dying Light's world: run its own collision code
+	-- (PhysicsCollide, else Touch) as if it hit GMod's world there.
+	local function collide(e, pos, normal)
+		local phys = e:GetPhysicsObject()
+		local v = IsValid(phys) and phys:GetVelocity() or e:GetVelocity()
+		e:SetPos(pos + normal * 2)
+		if isfunction(e.PhysicsCollide) then
+			local data = {HitPos = pos, HitNormal = -normal, HitEntity = game.GetWorld(), OurOldVelocity = v,
+				OurNewVelocity = vector_origin, TheirOldVelocity = vector_origin, Speed = v:Length(), DeltaTime = 1,
+				HitSpeed = v, PhysObject = phys, HitObject = game.GetWorld():GetPhysicsObject()}
+			local ok, err = pcall(e.PhysicsCollide, e, data, phys)
+			if not ok then gmodlight.Log("addon projectile " .. e:GetClass() .. ": " .. tostring(err)) end
+		elseif isfunction(e.Touch) then
+			pcall(e.Touch, e, game.GetWorld())
+		end
+		if IsValid(e) and not e:IsMarkedForDeletion() then bounce(e, pos, normal) end
+	end
+
+	-- Things spawned from the Q menu: in front of the player (GMod's spawn trace hits
+	-- nothing out here and puts them far off), then they fall onto Dying Light's ground.
+	function GML.TrackItem(e, ply)
+		if not IsValid(e) then return end
+		if IsValid(ply) then
+			local fwd = ply:GetAimVector()
+			fwd.z = 0
+			if fwd:LengthSqr() < 0.01 then fwd = Vector(1, 0, 0) end
+			fwd:Normalize()
+			local size = e:OBBMaxs() - e:OBBMins()
+			local reach = math.max(1.5 * M, math.max(size.x, size.y) * 0.75)
+			e:SetPos(ply:GetShootPos() + fwd * reach - Vector(0, 0, 0.6 * M) - Vector(0, 0, e:OBBMins().z))
+		end
+		local phys = e:GetPhysicsObject()
+		if IsValid(phys) then phys:EnableMotion(true) phys:Wake() end
+		tracked[e] = {last = e:GetPos(), what = "settle", foot = Vector(0, 0, e:OBBMins().z)}
+	end
+	hook.Add("OnPhysgunPickup", "gmodlight_items", function(ply, e) if tracked[e] then tracked[e].held = true end end)
+	hook.Add("PhysgunDrop", "gmodlight_items", function(ply, e)
+		if tracked[e] then tracked[e].held = false tracked[e].last = e:GetPos() end
+	end)
+
 	local function impact(pos, normal)
 		local ed = EffectData()
 		ed:SetOrigin(pos)
@@ -460,6 +543,41 @@ if SERVER then
 		ed:SetRadius(2)
 		util.Effect("MetalSpark", ed)
 		sound.Play("physics/concrete/concrete_impact_bullet" .. math.random(1, 4) .. ".wav", pos, 70, math.random(95, 105), 0.6)
+	end
+
+	-- Dying Light draws these with its own meshes when it can ([Experimental]
+	-- DLGrenades in GModLight.ini): then they sit in its world exactly, lit by it and
+	-- behind its walls. GMod's own copy hides once Dying Light says it has one.
+	local VISUAL_MESH = {npc_grenade_frag = "wn_grenade_a.msh"}
+	local visualsSent, visualLogs = false, 0
+	local function syncVisuals()
+		local list = {}
+		for e in pairs(tracked) do
+			local mesh = IsValid(e) and VISUAL_MESH[e:GetClass()]
+			if mesh and #list < 32 then
+				local x, y, z = GML.ToDL(e:GetPos())
+				local fx, fy, fz = GML.DirToDL(e:GetForward())
+				local ux, uy, uz = GML.DirToDL(e:GetUp())
+				list[#list + 1] = {e:EntIndex(), mesh, x, y, z, fx, fy, fz, ux, uy, uz}
+			end
+		end
+		if #list == 0 and not visualsSent then return end
+		gmodlight.SetVisuals(list)
+		visualsSent = #list > 0
+		local shown = {}
+		for _, id in ipairs(gmodlight.GetShownVisuals()) do shown[id] = true end
+		for e in pairs(tracked) do
+			if IsValid(e) and VISUAL_MESH[e:GetClass()] then
+				local dl = shown[e:EntIndex()] == true
+				if e:GetNoDraw() ~= dl then
+					e:SetNoDraw(dl)
+					if visualLogs < 10 then
+						visualLogs = visualLogs + 1
+						gmodlight.Log(e:GetClass() .. " " .. e:EntIndex() .. (dl and " drawn by Dying Light" or " drawn by GMod"))
+					end
+				end
+			end
+		end
 	end
 
 	local worldLogs = 0
@@ -484,7 +602,9 @@ if SERVER then
 				local v = IsValid(phys) and phys:GetVelocity() or e:GetVelocity()
 				-- From last tick's position to three ticks ahead: Dying Light answers a tick or
 				-- two later, and by then a grenade had already sunk into the ground.
-				if v:LengthSqr() > 1 then add({ent = e}, t.last, pos + v * engine.TickInterval() * 3) end
+				-- Spawned items are traced from their bottom (they land on it), not while held.
+				local foot = t.foot or vector_origin
+				if v:LengthSqr() > 1 and not t.held then add({ent = e}, t.last + foot, pos + foot + v * engine.TickInterval() * 3) end
 				t.last = pos
 			end
 		end
@@ -509,7 +629,7 @@ if SERVER then
 					if owner.bullet then
 						impact(pos, normal)
 					elseif IsValid(e) then
-						local what = PROJECTILES[e:GetClass()]
+						local what = (tracked[e] and tracked[e].what) or PROJECTILES[e:GetClass()]
 						if worldLogs < 20 then
 							worldLogs = worldLogs + 1
 							gmodlight.Log(string.format("%s hit Dying Light's world %.1fm along its path: %s", e:GetClass(), h.dist, what))
@@ -519,6 +639,10 @@ if SERVER then
 							explode(e, pos, normal)
 						elseif what == "bounce" then
 							bounce(e, pos, normal)
+						elseif what == "settle" then
+							settle(e, pos, normal)
+						elseif what == "collide" then
+							collide(e, pos, normal)
 						elseif what == "stick" then
 							tracked[e] = nil
 							e:SetPos(pos + normal * 2)
@@ -533,6 +657,7 @@ if SERVER then
 		for id, o in pairs(probeOwner) do
 			if now - o.at > 1 then probeOwner[id] = nil end
 		end
+		syncVisuals()
 	end
 	GML.TraceWorld = traceWorld
 
@@ -565,6 +690,27 @@ if SERVER then
 
 	hook.Add("PhysgunPickup", "gmodlight", function(ply, e)
 		if e.GMLDead then return false end
+	end)
+
+	-- ---------- Q menu: things the player uses ----------
+	-- Weapons, items and vehicles; no props, ragdolls, effects or NPCs (they'd stand
+	-- on nothing in Dying Light's world). The client hides those tabs too.
+	local function blocked() if connected then return false end end
+	hook.Add("PlayerSpawnProp", "gmodlight", blocked)
+	hook.Add("PlayerSpawnRagdoll", "gmodlight", blocked)
+	hook.Add("PlayerSpawnEffect", "gmodlight", blocked)
+	hook.Add("PlayerSpawnNPC", "gmodlight", blocked)
+	hook.Add("PlayerSpawnObject", "gmodlight", function(ply, model, skin)
+		-- Spawnlists and the prop tools: everything model-based.
+		if connected then return false end
+	end)
+	hook.Add("PlayerSpawnedSENT", "gmodlight", function(ply, e) if connected then GML.TrackItem(e, ply) end end)
+	hook.Add("PlayerSpawnedSWEP", "gmodlight", function(ply, e) if connected then GML.TrackItem(e, ply) end end)
+	hook.Add("PlayerSpawnedVehicle", "gmodlight", function(ply, e) if connected then GML.TrackItem(e, ply) end end)
+	-- Driving isn't done yet: the player's view is Dying Light's camera, which a
+	-- GMod seat can't move. Vehicles can be spawned, physgunned and shot.
+	hook.Add("CanPlayerEnterVehicle", "gmodlight", function(ply, veh)
+		if connected then return false end
 	end)
 
 	hook.Add("OnPhysgunPickup", "gmodlight", function(ply, e)
@@ -702,6 +848,19 @@ if SERVER then
 				if IsValid(phys) then phys:SetVelocity(GML.ToSource(cam.x + 1.2, cam.y + 1.5, cam.z - 9) - GML.ToSource(cam.x, cam.y, cam.z)) end
 				gmodlight.Log("selftest: grenade thrown")
 			end)
+			-- A health kit from the Q menu's Entities tab, the way the menu spawns it:
+			-- it should end up resting on Dying Light's ground in front of the camera.
+			timer.Simple(14, function()
+				Entity(1):ConCommand("gm_spawnsent item_healthkit")
+				timer.Simple(3, function()
+					for _, e in ipairs(ents.FindByClass("item_healthkit")) do
+						local x, y, z = GML.ToDL(e:GetPos() + Vector(0, 0, e:OBBMins().z))
+						local _, _, _, cam = GML.Camera()
+						gmodlight.Log(string.format("selftest: health kit bottom at DL (%.2f, %.2f, %.2f), %.2fm below the camera",
+							x, y, z, cam.y - y))
+					end
+				end)
+			end)
 		end)
 	end
 
@@ -815,6 +974,28 @@ local function setMode(m)
 	gmodlight.Log("mode " .. old .. " -> " .. m)
 end
 
+-- The Q menu keeps what the player uses (weapons, entities, vehicles); props,
+-- NPCs, dupes and the rest go (the server refuses them too). Plain Garry's Mod,
+-- without Dying Light, keeps its full menu: this only runs once connected.
+local MENU_KEEP = {"weapon", "entit", "vehicle"}
+local function limitSpawnMenu()
+	if not spawnmenu or not spawnmenu.GetCreationTabs then return end
+	local tabs = spawnmenu.GetCreationTabs()
+	local removed = {}
+	for name in pairs(tabs) do
+		local keep = false
+		for _, k in ipairs(MENU_KEEP) do keep = keep or string.find(string.lower(name), k, 1, true) ~= nil end
+		if not keep then
+			tabs[name] = nil
+			removed[#removed + 1] = name
+		end
+	end
+	if #removed > 0 then
+		gmodlight.Log("Q menu: removed " .. table.concat(removed, ", "))
+		RunConsoleCommand("spawnmenu_reload")
+	end
+end
+
 hook.Add("Think", "gmodlight", function()
 	if not connected then
 		if RealTime() - lastTry < 2 then return end
@@ -825,6 +1006,7 @@ hook.Add("Think", "gmodlight", function()
 		gmodlight.Log("client connected; capture hook " .. tostring(capture))
 		-- Lua-made convars don't exist yet when the command line runs, so set them here.
 		RunConsoleCommand("cl_showhints", "0")
+		limitSpawnMenu()
 		if gmodlight.SelfTest() then
 			timer.Create("gmodlight_stats", 4, 0, function() gmodlight.Log(gmodlight.Stats()) end)
 		end

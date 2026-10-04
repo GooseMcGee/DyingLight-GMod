@@ -31,7 +31,9 @@ std::atomic<bool> gVisible{true};
 std::atomic<bool> gSuppressed{true};
 std::atomic<bool> gReproject{true};
 std::atomic<bool> gParallax{true};
-std::atomic<int> gMaxFps{0};  // Dying Light frame cap, see LimitFrameRate
+std::atomic<int> gMaxFps{0};  // Dying Light frame cap, see LimitFrameRate (-1 = auto)
+bool gLowLatency = true;      // SetMaximumFrameLatency(1) on Dying Light's device
+int gAutoFps = 0;             // auto cap: refresh / N, see UpdateAutoRate
 constexpr float kDepthMax = 25.0f;  // meters at alpha 254: GML.DEPTH_MAX in the addon
 
 struct State {
@@ -429,6 +431,14 @@ void Draw(IDXGISwapChain* sc) {
             return;
         }
         s.dev->GetImmediateContext(&s.ctx);
+        // At most one frame queued ahead of the display: with VSync, Dying Light
+        // otherwise runs up to 3 frames ahead (input lag, and GMod's frame lags too).
+        IDXGIDevice1* dxgi = nullptr;
+        if (gLowLatency && SUCCEEDED(s.dev->QueryInterface(__uuidof(IDXGIDevice1), reinterpret_cast<void**>(&dxgi)))) {
+            dxgi->SetMaximumFrameLatency(1);
+            dxgi->Release();
+            LOGI("frame latency 1");
+        }
         if (!CreateResources()) { s.failed = true; return; }
         LOGI("overlay ready");
     }
@@ -453,6 +463,7 @@ void Draw(IDXGISwapChain* sc) {
     double frame = last.QuadPart ? ms(q[0].QuadPart - last.QuadPart) : 0;
     last = q[0];
     int cap = gMaxFps.load(std::memory_order_relaxed);
+    if (cap < 0) cap = gAutoFps;
     double limit = cap > 0 ? 1500.0 / cap : 25.0;
     static int hitches = 0;
     static DWORD lastSummary = 0;
@@ -658,8 +669,50 @@ void CaptureIfRequested(IDXGISwapChain* sc) {
 // paced. Waits after Present, so the next frame (and its input) starts fresh: a
 // high-resolution timer for most of the wait, then a short spin for precision.
 
-void LimitFrameRate() {
+// Auto (MaxFPS=auto): an even share of the monitor's refresh, so every frame stays
+// on screen for the same number of refreshes. A fixed 60 on a 164 Hz monitor with
+// VSync shows frames for 3, 3, 2, 3... refreshes: judder even at a steady 60.
+// With VSync on we just present every Nth refresh (sync interval N), which paces
+// exactly; with VSync off the timer below caps at refresh / N.
+
+int gAutoLimit = 90;     // auto picks the highest refresh / N at or under this
+int gSyncInterval = 0;   // N for the current monitor (0 = not worked out yet)
+HMONITOR gAutoMonitor = nullptr;
+
+void UpdateAutoRate(IDXGISwapChain* sc) {
+    DXGI_SWAP_CHAIN_DESC d;
+    if (FAILED(sc->GetDesc(&d))) return;
+    HMONITOR mon = MonitorFromWindow(d.OutputWindow, MONITOR_DEFAULTTONEAREST);
+    if (mon == gAutoMonitor && gSyncInterval) return;
+    gAutoMonitor = mon;
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    int hz = 60;
+    if (GetMonitorInfoW(mon, &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+        hz = int(dm.dmDisplayFrequency);
+    int n = 1;
+    while (hz / n > gAutoLimit && n < 4) ++n;
+    gSyncInterval = n;
+    gAutoFps = hz / n;
+    LOGI("frame rate: monitor %d Hz, auto cap %d fps (every %d refresh%s)", hz, gAutoFps, n, n > 1 ? "es" : "");
+}
+
+// The sync interval to present with: the game's, or every Nth refresh in auto
+// mode when the game has VSync on.
+UINT PresentSync(IDXGISwapChain* sc, UINT sync) {
+    if (gMaxFps.load(std::memory_order_relaxed) >= 0) return sync;
+    UpdateAutoRate(sc);  // also gives the timer its rate when VSync is off
+    return sync ? std::max<UINT>(sync, UINT(gSyncInterval)) : 0;
+}
+
+void LimitFrameRate(UINT sync) {
     int fps = gMaxFps.load(std::memory_order_relaxed);
+    if (fps < 0) {
+        if (sync) return;  // VSync paces it (PresentSync)
+        fps = gAutoFps;
+    }
     if (fps <= 0) return;
     static LARGE_INTEGER freq{}, next{};
     static HANDLE timer = nullptr;
@@ -693,8 +746,9 @@ HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc, UINT sync, UINT flags) {
     if ((flags & DXGI_PRESENT_TEST) || tInPresent) return oPresent(sc, sync, flags);
     tInPresent = true;
     Draw(sc);
+    sync = PresentSync(sc, sync);
     HRESULT hr = oPresent(sc, sync, flags);
-    LimitFrameRate();
+    LimitFrameRate(sync);
     tInPresent = false;
     return hr;
 }
@@ -703,8 +757,9 @@ HRESULT STDMETHODCALLTYPE HkPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
     if ((flags & DXGI_PRESENT_TEST) || tInPresent) return oPresent1(sc, sync, flags, p);
     tInPresent = true;
     Draw(sc);
+    sync = PresentSync(sc, sync);
     HRESULT hr = oPresent1(sc, sync, flags, p);
-    LimitFrameRate();
+    LimitFrameRate(sync);
     tInPresent = false;
     return hr;
 }
@@ -770,7 +825,12 @@ void SetVisible(bool v) { gVisible = v; }
 void SetSuppressed(bool v) { gSuppressed = v; }
 void SetReproject(bool v) { gReproject = v; }
 void SetParallax(bool v) { gParallax = v; }
-void SetMaxFps(int fps) { gMaxFps = fps; }
+void SetLowLatency(bool v) { gLowLatency = v; }
+void SetMaxFps(int fps, int autoLimit) {
+    gAutoLimit = std::max(30, autoLimit);
+    gSyncInterval = 0;
+    gMaxFps = fps;
+}
 
 void RequestScreenshot(const char* reason, bool force) {
     if (!force && gShotCount >= kMaxShots) return;

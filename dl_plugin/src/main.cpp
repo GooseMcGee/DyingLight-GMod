@@ -43,6 +43,7 @@ struct Config {
     std::wstring gmodPath;   // folder containing gmod.exe; auto-detected if empty
     int gmodMaxWidth = 2560;
     std::wstring gmodArgs;
+    bool gmodWorkshop = false;     // load subscribed Workshop addons (M9K, ...)
     bool npcSync = false;
     std::vector<std::string> npcClasses;  // substrings of RTTI class names to mirror
     float npcRadius = 40.0f;
@@ -62,7 +63,10 @@ struct Config {
     bool releaseFix = true;        // on release, move the AI's own idea of the actor's position too
     bool gameThreadWork = true;    // move/damage actors on the game's update thread, not in Present
     bool useViewMatrix = true;     // camera from DL's render view matrix (includes shake/head bob)
-    int maxFps = 60;               // Dying Light frame cap (0 = off)
+    int maxFps = -1;               // Dying Light frame cap (0 = off, -1 = auto)
+    int autoFpsLimit = 90;         // auto: highest refresh / N at or under this
+    bool lowLatency = true;        // at most one frame queued
+    bool dlVisuals = false;        // Dying Light draws GMod's grenades with its own mesh (experimental)
     bool lockstep = true;          // GMod renders one frame per DL frame, right after DL's camera
     bool parallax = true;          // depth-aware re-projection (GMod sends distances in alpha)
     bool useCombined = true;       // camera from the renderer's combined matrix (the frame actually drawn)
@@ -121,6 +125,7 @@ void LoadConfig() {
     cfg.gmodPath = str(L"GMod", L"Path");
     cfg.gmodMaxWidth = num(L"GMod", L"MaxWidth", 2560);
     cfg.gmodArgs = str(L"GMod", L"ExtraArgs");
+    cfg.gmodWorkshop = num(L"GMod", L"Workshop", 0) != 0;
     cfg.npcSync = num(L"Npcs", L"Enabled", 0) != 0;
     cfg.npcClasses = SplitList(str(L"Npcs", L"ClassContains"));
     cfg.npcRadius = static_cast<float>(num(L"Npcs", L"Radius", 40));
@@ -140,7 +145,13 @@ void LoadConfig() {
     cfg.useViewMatrix = num(L"Advanced", L"UseViewMatrix", 1) != 0;
     cfg.useCombined = num(L"Advanced", L"UseRenderCamera", 1) != 0;
     cfg.parallax = num(L"Advanced", L"Parallax", 1) != 0;
-    cfg.maxFps = num(L"Performance", L"MaxFPS", 60);
+    {   // a number, 0 = none, or auto (the default): an even share of the monitor's refresh
+        std::wstring v = str(L"Performance", L"MaxFPS");
+        cfg.maxFps = (v.empty() || _wcsicmp(v.c_str(), L"auto") == 0) ? -1 : _wtoi(v.c_str());
+    }
+    cfg.autoFpsLimit = num(L"Performance", L"AutoLimit", 90);
+    cfg.lowLatency = num(L"Performance", L"LowLatency", 1) != 0;
+    cfg.dlVisuals = num(L"Experimental", L"DLGrenades", 0) != 0;
     cfg.lockstep = num(L"Performance", L"Lockstep", 1) != 0;
     cfg.driveExtrapolate = num(L"Npcs", L"ExtrapolateMs", 35) / 1000.0;
     LOGI("config: spawn menu key %u (%s), physgun key %u, npc sync %d (%zu class filters)",
@@ -220,7 +231,7 @@ void LaunchGMod(unsigned dlW, unsigned dlH) {
     std::wstring exe = dir + L"\\bin\\win64\\gmod.exe";
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) exe = dir + L"\\gmod.exe";
 
-    std::wstring cmdLine = GModCommandLine(exe, w, h, cfg.gmodArgs);
+    std::wstring cmdLine = GModCommandLine(exe, w, h, cfg.gmodArgs, cfg.gmodWorkshop);
     std::vector<wchar_t> cmd(cmdLine.begin(), cmdLine.end());
     cmd.push_back(0);
 
@@ -629,6 +640,32 @@ std::unordered_map<uint64_t, void*> gBodies;  // AI handle -> body, from the lat
 std::unordered_map<uint64_t, DWORD> gBlockedAt;  // when a driven actor last hit the world
 struct Released { eng::vec3 pos; DWORD at; };
 std::unordered_map<uint64_t, Released> gReleased;  // let go by GMod in the last few seconds
+std::unordered_map<uint64_t, float> gGroundY;  // ground height under each driven actor
+
+// Dying Light's ground under an actor: straight down from above it, through other
+// actors. A thrown zombie used to land at the height it was grabbed at, which is
+// under the street once it's carried uphill or grabbed from a ledge.
+bool GroundBelow(void* self, float x, float top, float z, float& ground) {
+    eng::vec3 a{x, top, z}, b{x, top - 80.0f, z};
+    float travelled = 0;
+    for (int tries = 0; tries < 4; ++tries) {
+        eng::RayHit r;
+        if (!eng::Raytrace(gPlayer, a, b, r, self) || !r.hit) return false;
+        if (r.p18 && r.p18 != self && WantedClass(eng::ClassName(r.p18))) {
+            travelled += r.dist + 0.05f;
+            a.y = top - travelled;
+            continue;
+        }
+        if (r.floats[1] < 0.3f) {  // a wall or overhang, not something to stand on
+            travelled += r.dist + 0.05f;
+            a.y = top - travelled;
+            continue;
+        }
+        ground = r.pos.y;
+        return true;
+    }
+    return false;
+}
 
 // Every few seconds in GMod hands: where everything is relative to the camera.
 void SceneReport(const Camera& cam, void* const* objs, int n) {
@@ -712,6 +749,23 @@ void SyncNpcs(Header* hdr, const Camera& cam) {
                 npc.head = {head.x, head.y, head.z};
                 npc.feet = {feet.x, feet.y, feet.z};
                 npc.flags |= kNpcPosed;
+            }
+            // Held or flying: where's the ground under it?
+            bool isDriven = false;
+            for (uint32_t k = 0; k < nd; ++k) {
+                if (hdr->driven[k].handle != npc.handle) continue;
+                isDriven = true;
+                auto known = gGroundY.find(npc.handle);
+                float top = std::max(npc.pos.y, hdr->driven[k].pos.y);
+                if (known != gGroundY.end()) top = std::max(top, known->second);
+                float g;
+                if (gPlayer && GroundBelow(objs[i], npc.pos.x, top + 1.6f, npc.pos.z, g)) gGroundY[npc.handle] = g;
+                break;
+            }
+            if (!isDriven) gGroundY.erase(npc.handle);
+            if (auto g = gGroundY.find(npc.handle); g != gGroundY.end()) {
+                npc.ground = g->second;
+                npc.flags |= kNpcGround;
             }
             auto blocked = gBlockedAt.find(npc.handle);
             if (blocked != gBlockedAt.end() && now - blocked->second < 300) npc.flags |= kNpcBlocked;
@@ -797,6 +851,12 @@ void SyncNpcs(Header* hdr, const Camera& cam) {
             if (logs++ < 20) LOGI("thrown actor %p hit the world after %.2fm of %.2fm (+18 %s)", pinObjs[i], r.dist, len,
                                   eng::ClassName(r.p18));
         }
+    }
+    // Never below the ground: GMod lands it there too (kNpcGround), this covers
+    // the frames in between.
+    for (int i = 0; i < pins; ++i) {
+        auto g = gGroundY.find(reinterpret_cast<uint64_t>(pinObjs[i]));
+        if (g != gGroundY.end() && pinPos[i].y < g->second) pinPos[i].y = g->second;
     }
     eng::SetPins(pinObjs, pinPos, pins);
     // Released since last time: watch them for a few seconds (snap-back check).
@@ -1201,6 +1261,55 @@ DWORD gLastFrameLog = 0;
 std::mutex gWorldMutex;
 std::mutex gCamMutex;               // guards gWorldCam only
 Camera gWorldCam{};                // latest camera from Present, for the tick
+// GMod things Dying Light draws itself (bridge.h Visuals): GMod id -> our model.
+std::unordered_map<uint32_t, void*> gVisualObjs;
+int gVisualFails = 0;
+
+void SyncVisuals(Header* hdr) {
+    Visuals& v = hdr->visuals;
+    if (!cfg.dlVisuals || !gPlayer || gVisualFails >= 3) {
+        v.shownCount = 0;
+        return;
+    }
+    static Visual in[kMaxVisuals];
+    uint32_t n = hdr->gmodReady ? std::min(v.count, kMaxVisuals) : 0;  // GMod gone: remove them all
+    MemoryBarrier();
+    memcpy(in, v.items, n * sizeof(Visual));
+    std::unordered_set<uint32_t> want;
+    for (uint32_t i = 0; i < n; ++i) {
+        const Visual& it = in[i];
+        if (!it.mesh[0]) continue;
+        want.insert(it.id);
+        // Rows of DL's matrix: columns x, y (up), z (forward), translation; x = up x
+        // forward keeps it a rotation (not a mirror image).
+        Vec3 f = it.fwd, u = it.up;
+        Vec3 x{u.y * f.z - u.z * f.y, u.z * f.x - u.x * f.z, u.x * f.y - u.y * f.x};
+        eng::mtx34 m{{{x.x, u.x, f.x, it.pos.x}, {x.y, u.y, f.y, it.pos.y}, {x.z, u.z, f.z, it.pos.z}}};
+        auto found = gVisualObjs.find(it.id);
+        if (found != gVisualObjs.end()) {
+            eng::SetWorldXform(found->second, m);
+            continue;
+        }
+        void* obj = eng::CreateModel(gPlayer, it.mesh, m);
+        if (!obj) {
+            if (++gVisualFails >= 3) LOGW("Dying Light models for GMod things: giving up after %d failures", gVisualFails);
+            continue;
+        }
+        gVisualObjs[it.id] = obj;
+    }
+    for (auto i = gVisualObjs.begin(); i != gVisualObjs.end();) {
+        if (want.count(i->first)) { ++i; continue; }
+        eng::DeleteModel(i->second);
+        i = gVisualObjs.erase(i);
+    }
+    uint32_t w = 0;
+    for (auto& [id, obj] : gVisualObjs)
+        if (w < kMaxVisuals) v.shown[w++] = id;
+    v.shownCount = w;
+    MemoryBarrier();
+    v.shownSeq = v.shownSeq + 1;
+}
+
 std::atomic<bool> gWorldLive{false};  // in the world, not paused
 std::atomic<DWORD> gLastTickAt{0}, gTickThread{0};
 
@@ -1221,6 +1330,8 @@ void WorldWork(Header* hdr, const Camera& cam) {
         gHideTried = false;
         gReleased.clear();
         gBlockedAt.clear();
+        gGroundY.clear();
+        gVisualObjs.clear();  // freed with the level
         gBodies.clear();
         gLiveNpcs.clear();
         eng::SetPins(nullptr, nullptr, 0);
@@ -1233,6 +1344,7 @@ void WorldWork(Header* hdr, const Camera& cam) {
     TraceProbes(hdr);
     QueryPerformanceCounter(&q[2]);
     ApplyEvents(hdr);
+    SyncVisuals(hdr);
     QueryPerformanceCounter(&q[3]);
     // DL's own arms, weapon and weapon HUD go while GMod's hands are out.
     HideOwnModel(gMode != kModePlay);
@@ -1374,9 +1486,10 @@ DWORD WINAPI InitThread(LPVOID) {
     eng::SetUseViewMatrix(cfg.useViewMatrix);
     eng::SetUseCombined(cfg.useCombined);
     overlay::SetParallax(cfg.parallax);
-    overlay::SetMaxFps(cfg.maxFps);
+    overlay::SetMaxFps(cfg.maxFps, cfg.autoFpsLimit);
+    overlay::SetLowLatency(cfg.lowLatency);
     if (cfg.lockstep) gFrameEvent = CreateEventW(nullptr, FALSE, FALSE, kFrameEventName);
-    LOGI("frame cap %d fps (0 = none); GMod lockstep %s", cfg.maxFps, gFrameEvent ? "on" : "off");
+    LOGI("frame cap %d fps (0 = none, -1 = auto up to %d); GMod lockstep %s", cfg.maxFps, cfg.autoFpsLimit, gFrameEvent ? "on" : "off");
     overlay::Callbacks cb;
     cb.onFrame = OnFrame;
     if (!overlay::Init(cb)) { LOGE("overlay init failed; GModLight disabled"); return 0; }

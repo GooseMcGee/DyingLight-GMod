@@ -522,6 +522,56 @@ LUA_FUNCTION(L_SetProbes) {
     return 1;
 }
 
+// SetVisuals({{id, mesh, x, y, z, fx, fy, fz, ux, uy, uz}, ...}): things for DL to draw
+// with its own meshes (DL space). The whole list every time; missing ids go away.
+LUA_FUNCTION(L_SetVisuals) {
+    if (!gHdr) return 0;
+    LUA->CheckType(1, Type::Table);
+    gml::Visuals& v = gHdr->visuals;
+    uint32_t n = 0;
+    for (int i = 1; n < gml::kMaxVisuals; ++i) {
+        LUA->PushNumber(i);
+        LUA->GetTable(1);
+        if (!LUA->IsType(-1, Type::Table)) { LUA->Pop(); break; }
+        auto at = [&](int k) {
+            LUA->PushNumber(k);
+            LUA->GetTable(-2);
+            double d = LUA->GetNumber(-1);
+            LUA->Pop();
+            return static_cast<float>(d);
+        };
+        gml::Visual& it = v.items[n++];
+        it.id = static_cast<uint32_t>(at(1));
+        LUA->PushNumber(2);
+        LUA->GetTable(-2);
+        const char* mesh = LUA->IsType(-1, Type::String) ? LUA->GetString(-1) : "";
+        strncpy_s(it.mesh, mesh, _TRUNCATE);
+        LUA->Pop();
+        it.pos = {at(3), at(4), at(5)};
+        it.fwd = {at(6), at(7), at(8)};
+        it.up = {at(9), at(10), at(11)};
+        LUA->Pop();
+    }
+    v.count = n;
+    MemoryBarrier();
+    v.seq = v.seq + 1;
+    return 0;
+}
+
+// {id, ...}: the visuals DL is drawing with its own objects (GMod hides its copies).
+LUA_FUNCTION(L_GetShownVisuals) {
+    LUA->CreateTable();
+    if (!gHdr) return 1;
+    const gml::Visuals& v = gHdr->visuals;
+    uint32_t n = v.shownCount < gml::kMaxVisuals ? v.shownCount : gml::kMaxVisuals;
+    for (uint32_t i = 0; i < n; ++i) {
+        LUA->PushNumber(i + 1);
+        LUA->PushNumber(v.shown[i]);
+        LUA->SetTable(-3);
+    }
+    return 1;
+}
+
 // resultSeq, {{id, dist, x, y, z, nx, ny, nz}, ...}: what DL's world was hit by the last answered probes.
 LUA_FUNCTION(L_GetProbeHits) {
     if (!gHdr) { LUA->PushNumber(0); LUA->CreateTable(); return 2; }
@@ -632,6 +682,7 @@ LUA_FUNCTION(L_GetNpcs) {
             LUA->PushNumber(npc.feet.y); LUA->SetField(-2, "fy");
             LUA->PushNumber(npc.feet.z); LUA->SetField(-2, "fz");
         }
+        if (npc.flags & gml::kNpcGround) { LUA->PushNumber(npc.ground); LUA->SetField(-2, "ground"); }
         LUA->SetTable(-3);
     }
     return 2;
@@ -783,6 +834,8 @@ GMOD_MODULE_OPEN() {
     Reg(LUA, "GetSceneLight", L_GetSceneLight);
     Reg(LUA, "SetProbes", L_SetProbes);
     Reg(LUA, "GetProbeHits", L_GetProbeHits);
+    Reg(LUA, "SetVisuals", L_SetVisuals);
+    Reg(LUA, "GetShownVisuals", L_GetShownVisuals);
     LUA->SetField(-2, "gmodlight");
     LUA->Pop();
     return 0;

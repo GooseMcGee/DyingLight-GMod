@@ -3,23 +3,48 @@
 Everything still worth doing, ranked, with how to do it. The research behind it
 is in [ENGINE_ANALYSIS.md](ENGINE_ANALYSIS.md); RE scripts are in `tools/re/`.
 
-## Where it stands (round 10)
+## Where it stands (round 11)
 
 | Area | State |
 |---|---|
 | Overlay, input, modes, weapon wheel | Works in game |
 | Field of view / box alignment | Fixed; verified with `fakehost --fovtest` |
-| Turning | Garry's Mod draws where the view will be when shown (prediction) and Dying Light re-projects the rest: world stays exact, the gun only shifts when a turn starts/stops. `fakehost --spin-rate 3`: 0.03� off instead of 3.3� |
+| Turning | Garry's Mod draws where the view will be when shown (prediction) and Dying Light re-projects the rest: world stays exact, the gun only shifts when a turn starts/stops. `fakehost --spin-rate 3`: 0.03 deg off instead of 3.3 deg |
 | Moving | Garry's Mod draws from where the camera will be (fixes near things, like a grenade at your feet, sliding while walking). DL logs the leftover |
-| Physgun on zombies | Works in game; no snap-backs since round 9. Round 10: held zombies extrapolated between GMod updates, GMod interpolation 100 ? 15 ms |
-| Kyle's arms and weapon | Found (`PlayerDI+0x338` ? `PlayerFppVis`); round 10 follows its pointers to the real model; untested |
-| GMod guns ? DL damage | Kills work. First-hit fault traced to the wound-skin swap running off the game thread; fixed by the message-pump game tick (round 7); untested |
+| Physgun on zombies | Works in game; no snap-backs since round 9. Round 10: held zombies extrapolated between GMod updates, GMod interpolation 100 -> 15 ms |
+| Kyle's arms and weapon | Hidden, including climbing and balancing (round 10) |
+| GMod guns -> DL damage | Kills work. First-hit fault traced to the wound-skin swap running off the game thread; fixed by the message-pump game tick (round 7); untested |
 | RPG, grenades, crossbow, bullet impacts | RPG "near perfect" in game; grenades bounce; bullet sparks |
 | Weapon look | Lit like the scene, 2560 wide, 4x MSAA, sway/bob/inertia |
 | Zombie hitboxes | Fitted to the skeleton; headshots from the head bone |
 | Stability | Round 8: no lock shared between Present and game-thread work (freeze risk removed); pointers into a level are dropped when the level changes |
 
-## Next in-game test: what the log answers
+## Round 11 (0.2.0): what changed and what the next test answers
+
+- **Frame pacing.** The 60 fps cap with VSync on a 164 Hz monitor showed frames
+  for 3, 3, 2 refreshes in turn: judder at a steady 60. `MaxFPS=auto` presents
+  every Nth refresh (sync interval N, 164 Hz -> 82 fps), so every frame stays up
+  equally long; plus `SetMaximumFrameLatency(1)` on DL's device. Log: `frame rate:
+  monitor N Hz, auto cap M fps`, `frame latency 1`.
+- **Zombies grabbed far away fell through the map.** They landed at the height
+  they were grabbed at (under the street once carried uphill or off a ledge) and
+  the wall ray is at waist height. Now DL traces the ground under every driven
+  actor (`kNpcGround`), GMod lands it there and DL never pins one below it.
+  `fakehost --ground 1` covers it.
+- **Q menu** keeps Weapons, Entities and Vehicles; props, NPCs, dupes, saves and
+  post-processing are gone (server refuses them too). Spawned things appear in
+  front of the player and land on DL's ground (probes, "settle"). Vehicles can't
+  be driven yet (see 3).
+- **Workshop addons** (`[GMod] Workshop=1`): M9K and other weapon packs.
+  Projectiles of addon weapons are tracked by class name and their own
+  `PhysicsCollide`/`Touch` runs where they meet DL's world. Untested with M9K.
+- **Experimental: Dying Light draws GMod's grenades** (`[Experimental]
+  DLGrenades=1`, see 3). Next log answers: `model spawning: ... under P (class)
+  -> Q (class)`, and in gmodlight.log `npc_grenade_frag N drawn by Dying Light`.
+  If DL's grenade shows and stays put while turning, the same path takes rockets,
+  props and vehicles.
+
+## Round 10 in-game test: what the log answers
 
 1. `threads: Present N, window M` and `world work moved to the game thread`: the
    message-pump tick is running (and whether Present is a different thread).
@@ -134,8 +159,24 @@ is in [ENGINE_ANALYSIS.md](ENGINE_ANALYSIS.md); RE scripts are in `tools/re/`.
 
 ## 3. Features
 
-- **Weapon spawning** (asked for "later"): DL's dev menu has item spawning
-  (`LevelDI` methods). GMod's own SWEPs already work through the spawn menu.
+- **Dying Light models for GMod things** (round 11 experiment). The user's idea:
+  instead of compositing a GMod grenade over DL's frame, have DL draw a grenade
+  itself. gamedll spawns models as `IGSObject::CreateObject(parent, CRTTI)` ->
+  `SetWorldXform` -> `SetMeshName` -> `InitObject(parent)` -> `ActivateOnModule`
+  (gamedll 0xb0bf3); `CModelObject::m_RTTI` is exported; meshes are named in the
+  inventory scripts (`wn_grenade_a.msh`, `wn_bomb_b.msh`, ...). Implemented as
+  `eng::CreateModel` with the bridge's `Visuals` list; parent = top of the
+  player's parent chain. Unknowns: whether that parent is right, the ttl string
+  layout guess (`{char*, u32 size, u32 capacity}`), and whether the mesh needs
+  `LoadMesh`. If it works: rockets (`wn_rocket*`?), and GMod props mapped to DL
+  props of similar shape. Collision (`SetFlag` 0x28?) would make them solid.
+- **Driving GMod vehicles.** Spawning works (round 11) but entering is blocked:
+  the view is DL's camera on Kyle. Plan: on entering, pin Kyle (the player
+  object, like zombies) to the seat position every frame and let GMod's vehicle
+  drive; needs DL's ground under the wheels in GMod: a moving invisible
+  collision plate under the vehicle at the DL ground height from probes (flat
+  streets), later a heightfield from a grid of probes around it.
+- **Weapon spawning**: GMod's own SWEPs, and addon packs with `Workshop=1`.
 - **Props in DL's world**: the probe system now exists; tracking `prop_physics`
   like grenades (bounce, rest on DL ground) gives props that land on streets
   and roofs. Proper collision would need DL's geometry near the player streamed

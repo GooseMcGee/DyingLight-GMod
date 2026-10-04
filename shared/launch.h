@@ -5,14 +5,15 @@
 
 namespace gml {
 
-inline std::wstring GModCommandLine(const std::wstring& exe, unsigned w, unsigned h, const std::wstring& extra) {
+inline std::wstring GModCommandLine(const std::wstring& exe, unsigned w, unsigned h, const std::wstring& extra,
+                                    bool workshop = false) {
     wchar_t cmd[2048];
     swprintf_s(cmd,
         // No -console: an open console pauses a singleplayer game.
         // -condebug: console output goes to garrysmod/console.log for troubleshooting.
-        // -noworkshop: Workshop addons stay out of it (and out of its crashes). Not -noaddons:
-        // that would also skip GModLight's own addon.
-        L"\"%s\" -windowed -noborder -w %u -h %u -novid -nojoy -nohltv -condebug -noworkshop "
+        // -noworkshop (unless [GMod] Workshop=1): subscribed Workshop addons stay out of it
+        // (and out of their crashes). Not -noaddons: that would also skip GModLight's own addon.
+        L"\"%s\" -windowed -noborder -w %u -h %u -novid -nojoy -nohltv -condebug %s"
         // World, sky, fog and post-processing off: GMod's frame is just props, tools and UI
         // on a flat chroma key that Dying Light can see through. 4x MSAA: edges blend into
         // the key, which Dying Light un-mixes, so weapons get smooth edges over its scene.
@@ -26,7 +27,7 @@ inline std::wstring GModCommandLine(const std::wstring& exe, unsigned w, unsigne
         // fps_max is only a ceiling: GMod draws in lockstep with Dying Light (bridge.h
         // kFrameEventName), single-threaded so each frame is drawn and shown in order.
         L"+mat_queue_mode 0 +snd_mute_losefocus 0 +net_graph 0 +fps_max 200 +map gm_flatgrass %s",
-        exe.c_str(), w, h, extra.c_str());
+        exe.c_str(), w, h, workshop ? L"" : L"-noworkshop ", extra.c_str());
     return cmd;
 }
 

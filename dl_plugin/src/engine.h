@@ -84,6 +84,12 @@ int MoveGameCopies(void* obj, const vec3& from, const vec3& to);
 // (e.g. what the player object owns), with the offsets they're stored at.
 int ObjectsReferencedBy(void* obj, size_t bytes, void** out, uint32_t* offsets, int max);
 
+// A Dying Light model object (CModelObject) with one of the game's meshes, placed
+// at `m`, in the level `nearCtrl` (any game object, e.g. the player) is in.
+// Returns its IControlObject (move it with SetWorldXform), or null. Game thread only.
+void* CreateModel(void* nearCtrl, const char* mesh, const mtx34& m);
+void DeleteModel(void* ctrl);
+
 // Called after every ILevel::TimerUpdate, on the game's update thread.
 using TickCallback = void (*)();
 bool InstallTickHook(TickCallback cb);

@@ -1325,6 +1325,96 @@ void SetForceHiddenUI(void* const* elems, int n) {
     gForceHiddenUIN.store(w, std::memory_order_release);
 }
 
+// ---------- Dying Light's own models for GMod things ----------
+// The way gamedll spawns a model (0xb0bf3): CreateObject on a parent game object,
+// SetWorldXform, SetMeshName, InitObject(parent), ActivateOnModule. The parent is
+// the top of the player's parent chain (the level's root object).
+
+namespace {
+struct TtlString { const char* data; uint32_t size, capacity; };  // ttl::string_base<char>, from gamedll's use
+using CreateObject_t = void* (*)(void* parentGso, const void* rtti, bool flag, const void* name);
+using SetMeshName_t = void (*)(void* model, const TtlString& name);
+using GsoParent_t = void (*)(void* gso, void* parent);
+using GsoVoid_t = void (*)(void* gso);
+CreateObject_t pCreateObject = nullptr;
+SetMeshName_t pSetMeshName = nullptr;
+GsoParent_t pInitObject = nullptr;
+GsoVoid_t pActivateOnModule = nullptr, pDeleteThis = nullptr;
+const void* pModelRtti = nullptr;
+bool gModelResolved = false;
+
+bool ResolveModelSpawn() {
+    if (gModelResolved) return pCreateObject && pSetMeshName && pInitObject && pActivateOnModule && pDeleteThis && pModelRtti;
+    gModelResolved = true;
+    HMODULE e = GetModuleHandleA("engine_x64_rwdi.dll");
+    Resolve(e, "?CreateObject@IGSObject@@QEAAPEAV1@AEBVCRTTI@@_NPEBV?$string_base@D@ttl@@@Z", pCreateObject);
+    Resolve(e, "?SetMeshName@IModelObject@@QEAAXAEBV?$string_base@D@ttl@@@Z", pSetMeshName);
+    Resolve(e, "?InitObject@IGSObject@@QEAAXPEAV1@@Z", pInitObject);
+    Resolve(e, "?ActivateOnModule@IGSObject@@QEAAXXZ", pActivateOnModule);
+    Resolve(e, "?DeleteThis@IGSObject@@QEAAXXZ", pDeleteThis);
+    pModelRtti = reinterpret_cast<const void*>(GetProcAddress(e, "?m_RTTI@CModelObject@@2VCRTTI@@A"));
+    bool ok = pCreateObject && pSetMeshName && pInitObject && pActivateOnModule && pDeleteThis && pModelRtti;
+    LOGI("model spawning: %s", ok ? "all engine functions found" : "missing engine functions");
+    return ok;
+}
+
+void* RootGso(void* anyCtrl) {
+    void* top = anyCtrl;
+    for (int i = 0; i < 32; ++i) {
+        void* p = Parent(top);
+        if (!p) break;
+        top = p;
+    }
+    return CastTo(top, ".?AVIGSObject@@");
+}
+
+void* CreateModelRaw(void* parent, const char* mesh, const mtx34& m, void** ctrlOut) {
+    __try {
+        void* gso = pCreateObject(parent, pModelRtti, false, nullptr);
+        if (!gso) return nullptr;
+        void* ctrl = CastTo(gso, ".?AVIControlObject@@");
+        void* model = CastTo(gso, ".?AVIModelObject@@");
+        if (!ctrl || !model) return nullptr;
+        pSetWorldXform(ctrl, &m);
+        TtlString name{mesh, uint32_t(strlen(mesh)), uint32_t(strlen(mesh))};
+        pSetMeshName(model, name);
+        pInitObject(gso, parent);
+        pActivateOnModule(gso);
+        pSetWorldXform(ctrl, &m);
+        *ctrlOut = ctrl;
+        return gso;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+}  // namespace
+
+void* CreateModel(void* nearCtrl, const char* mesh, const mtx34& m) {
+    if (!ResolveModelSpawn() || !nearCtrl) return nullptr;
+    void* parent = RootGso(nearCtrl);
+    static int logs = 0;
+    if (!parent) {
+        if (logs++ < 5) LOGW("model spawning: no root object above %p", nearCtrl);
+        return nullptr;
+    }
+    void* ctrl = nullptr;
+    void* gso = CreateModelRaw(parent, mesh, m, &ctrl);
+    if (logs++ < 10)
+        LOGI("model spawning: %s under %p (%s) -> %p (%s)", mesh, parent, ClassName(parent), gso, gso ? ClassName(gso) : "failed");
+    return gso ? ctrl : nullptr;
+}
+
+void DeleteModel(void* ctrl) {
+    if (!pDeleteThis) return;
+    void* gso = CastTo(ctrl, ".?AVIGSObject@@");
+    if (!gso) return;
+    __try {
+        pDeleteThis(gso);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOGW("model spawning: deleting %p faulted", ctrl);
+    }
+}
+
 bool SetRendering(void* obj, bool on) {
     auto fn = oEnableRendering ? oEnableRendering : reinterpret_cast<EnableRendering_t>(pEnableRendering);
     if (!fn) return false;

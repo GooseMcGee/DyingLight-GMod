@@ -14,7 +14,7 @@ constexpr wchar_t kShmName[] = L"Local\\GModLight_v1";
 // DL frame, started as soon as the camera is there, so every frame is equally fresh.
 constexpr wchar_t kFrameEventName[] = L"Local\\GModLight_frame";
 constexpr uint32_t kMagic = 0x544C4D47;  // "GMLT"
-constexpr uint32_t kVersion = 8;
+constexpr uint32_t kVersion = 9;
 
 constexpr uint32_t kMaxFrameW = 2560;
 constexpr uint32_t kMaxFrameH = 1440;
@@ -73,6 +73,7 @@ enum NpcFlags : uint32_t {
     kNpcHeldByGMod = 2,  // echoed back so DL knows GMod still owns it
     kNpcBlocked = 4,     // a thrown actor hit Dying Light's world; pos is where it stopped
     kNpcPosed = 8,       // head and feet below are from its skeleton
+    kNpcGround = 16,     // ground below is Dying Light's ground height under it
 };
 
 struct Npc {
@@ -83,6 +84,7 @@ struct Npc {
     uint32_t flags;
     Vec3 head;           // "head" bone (base of the skull), if kNpcPosed
     Vec3 feet;           // between the feet, if kNpcPosed
+    float ground;        // DL height of the ground under it, if kNpcGround (thrown ones land on it)
     char cls[48];        // C++ class name, for debugging
 };
 
@@ -176,6 +178,27 @@ struct Probes {
     ProbeHit results[kMaxProbes];  // only the probes that hit something
 };
 
+// GMod -> DL: things GMod wants Dying Light to draw itself, with one of its own
+// meshes, so they sit in DL's world exactly (its camera, lighting, walls in front).
+// A frag grenade is drawn as DL's grenade. DL lists back the ids it is drawing;
+// GMod hides its own copy of those.
+constexpr uint32_t kMaxVisuals = 32;
+struct Visual {
+    uint32_t id;         // GMod entity index
+    char mesh[60];       // DL mesh file, e.g. "wn_grenade_a.msh"
+    Vec3 pos;
+    Vec3 fwd;            // DL-space orientation
+    Vec3 up;
+};
+struct Visuals {
+    volatile uint32_t seq;
+    uint32_t count;
+    Visual items[kMaxVisuals];
+    volatile uint32_t shownSeq;          // DL -> GMod
+    uint32_t shownCount;
+    uint32_t shown[kMaxVisuals];         // ids DL has its own object for
+};
+
 struct Header {
     uint32_t magic;
     uint32_t version;
@@ -204,6 +227,7 @@ struct Header {
     volatile float latency;
     SceneLight scene;
     Probes probes;
+    Visuals visuals;
     FrameSlots frame;
 };
 

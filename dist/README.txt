@@ -32,7 +32,7 @@ PLAY SINGLE PLAYER ONLY
 
 CONTROLS
   F2              Garry's Mod hands on/off (physgun and weapons)
-  F1 / hold Q     Spawn menu
+  F1 / hold Q     Spawn menu (weapons, entities, vehicles)
   hold C          Context menu
   Mouse buttons   Fire / physgun grab and freeze
   Mouse wheel     Weapon wheel; pushes/pulls what the physgun holds
@@ -42,11 +42,18 @@ CONTROLS
   F9              Show the zombie stand-in boxes (debug)
   Keys and options: GModLight.ini in the Dying Light folder.
 
+MORE GUNS (M9K AND OTHER WEAPON PACKS)
+  Subscribe to the pack on the Steam Workshop, then set Workshop=1 under [GMod]
+  in GModLight.ini (Dying Light folder). Its weapons appear in the spawn menu's
+  Weapons tab. Keep Workshop subscriptions few: many addons can crash Garry's
+  Mod at start. Vehicles can be spawned but not driven yet.
+
 IF SOMETHING GOES WRONG
   - Logs: "Dying Light\GModLight.log" and "GarrysMod\garrysmod\gmodlight.log".
     Please attach both when reporting a problem.
-  - Stutter: GModLight caps Dying Light at 60 fps ([Performance] MaxFPS in
-    GModLight.ini); lower it if your PC struggles.
+  - Stutter: GModLight caps Dying Light at an even share of your monitor's
+    refresh rate (164 Hz -> 82 fps, 144 Hz -> 72), so frames are evenly paced
+    with VSync. [Performance] MaxFPS / AutoLimit in GModLight.ini change it.
   - Garry's Mod crashes on start: too many Workshop addons can do that. GModLight
     starts it with -noworkshop, but if you start Garry's Mod yourself first,
     close it and let Dying Light start it.

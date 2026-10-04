@@ -25,7 +25,7 @@ join or host co-op with this installed.
 | Key | What it does |
 |---|---|
 | F2 | Garry's Mod hands on/off (physgun and weapons replace Kyle's) |
-| F1 / hold Q | Spawn menu |
+| F1 / hold Q | Spawn menu: weapons, entities, vehicles |
 | hold C | Context menu |
 | Mouse buttons | Fire; physgun grab / freeze |
 | Mouse wheel | Weapon wheel; push/pull what the physgun holds |
@@ -36,6 +36,15 @@ join or host co-op with this installed.
 
 Keys and options are in `GModLight.ini` in the Dying Light folder (frame cap,
 what to hide, damage scale, ...).
+
+### More guns (M9K and other weapon packs)
+
+Subscribe to the pack on the Steam Workshop, then set `Workshop=1` under `[GMod]`
+in `GModLight.ini`. Its weapons show up in the spawn menu's Weapons tab. Keep your
+Workshop subscriptions small: Garry's Mod can crash at start with lots of addons.
+(Addons unpacked into `garrysmod\addons` load either way.)
+
+Vehicles can be spawned and physgunned, but not driven yet.
 
 ### Problems?
 
@@ -61,7 +70,7 @@ Dying Light (host)                         Garry's Mod (hidden)
 - Garry's Mod clears everything but its own things to magenta; Dying Light draws
   that frame over its own, re-projected to its current camera using each
   object's distance, so GMod's things stay put on Dying Light's world.
-- The two run in lockstep at Dying Light's frame rate (60 by default).
+- The two run in lockstep at Dying Light's frame rate (by default an even share of the monitor's refresh rate, e.g. 82 fps at 164 Hz).
 - Zombies are mirrored as stand-ins fitted to their skeletons. Physgunned ones
   move the real zombie (Dying Light's position writers are hooked so its AI
   can't pull it back); damage goes through the zombie's own `TakeDamage`, and
