@@ -9,7 +9,7 @@ walls, shoot them with Garry's Mod weapons, fire rockets into Dying Light's stre
 
 ## Download and play
 
-1. Get the latest **GModLight-x.y.z.zip** from the [Releases](../../releases) page.
+1. Get the latest **GModLight-x.y.z.zip** from the [Releases](https://github.com/GooseMcGee/DyingLight-GMod/releases/latest) page.
 2. You need **Dying Light** and **Garry's Mod** on Steam, with Garry's Mod on the
    64-bit branch: *Garry's Mod → Properties → Betas → "x86-64 - Chromium + 64-bit binaries"*.
 3. Close both games, unzip, and double-click **Install.bat**. It finds both games
@@ -42,7 +42,7 @@ what to hide, damage scale, ...).
 
 ### Problems?
 
-Open an issue and attach `Dying Light\GModLight.log` and
+[Open an issue](https://github.com/GooseMcGee/DyingLight-GMod/issues) and attach `Dying Light\GModLight.log` and
 `GarrysMod\garrysmod\gmodlight.log`. Common fixes are in the README.txt inside
 the download.
 

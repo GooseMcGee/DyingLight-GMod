@@ -53,4 +53,4 @@ IF SOMETHING GOES WRONG
   - Another mod uses xinput1_3.dll in the Dying Light folder: the installer stops
     rather than replace it. Move that file away first.
 
-Source, issues and updates: see the project page this was downloaded from.
+Updates, source and problem reports: https://github.com/GooseMcGee/DyingLight-GMod
