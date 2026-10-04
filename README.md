@@ -2,10 +2,7 @@
 
 **Garry's Mod's physgun, weapons and spawn menu inside Dying Light.**
 
-Dying Light stays the real game: its world, zombies, parkour and combat. Garry's
-Mod runs hidden next to it, and its hands, physgun, weapons and spawn menu are
-drawn into Dying Light's view. Grab zombies with the physgun and fling them into
-walls, shoot them with Garry's Mod weapons, fire rockets into Dying Light's streets.
+Dying Light but with Garrys Mod Physics Gun, Q menu and more! Fling zombies instead of fighting them the boring old fashioned way. Prop spawning coming soon.
 
 ## Download and play
 
